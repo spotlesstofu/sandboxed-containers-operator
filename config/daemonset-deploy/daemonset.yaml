@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kata-containers-rpm-installer
+spec:
+  template:
+    spec:
+      containers:
+      - name: rpm
+        image: rhel-coreos-extensions@sha256...
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -xeuo pipefail
+          available_version=$(rpm -qp /usr/share/rpm-ostree/extensions/kata-containers-*.rpm)
+          installed_version=$(chroot /host rpm -q kata-containers) && \
+            [ "$installed_version" = "$available_version" ] && exit
+          packages="capstone daxctl-libs edk2-ovmf ipxe-roms-qemu kata-containers libfdt libpmem libpng librdmacm ndctl-libs pixman qemu-img qemu-kvm-common qemu-kvm-core seabios-bin seavgabios-bin virtiofsd"
+          mkdir /host/tmp/extensions/
+          for package in $packages; do cp /usr/share/rpm-ostree/extensions/${package}-* /host/tmp/extensions/; done
+          chroot /host rpm-ostree install /tmp/extensions/${available_version}.rpm
+          rm -rf /host/tmp/extensions/
+        # Mount host filesystem
+        volumeMounts:
+        - name: host-root
+          mountPath: /host
+        - name: host-tmp
+          mountPath: /host/tmp
+      volumes:
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
+      - name: host-tmp
+        hostPath:
+          path: /tmp
+          type: Directory
+     	# Restart policy - OnFailure means only restart if container fails or node reboots
+      restartPolicy: OnFailure
+# TODO
