@@ -65,6 +65,8 @@ type KataConfigOpenShiftReconciler struct {
 	kataConfig *kataconfigurationv1.KataConfig
 
 	ImgMc *mcfgv1.MachineConfig
+
+	DeploymentMode DeploymentMode
 }
 
 const (
@@ -144,6 +146,10 @@ func (r *KataConfigOpenShiftReconciler) Reconcile(ctx context.Context, req ctrl.
 	if err != nil {
 		r.Log.Info("Unable to process feature gates", "err", err)
 		return ctrl.Result{}, err
+	}
+
+	if r.DeploymentMode == DaemonSet {
+		return r.daemonSetDeployment()
 	}
 
 	return func() (ctrl.Result, error) {

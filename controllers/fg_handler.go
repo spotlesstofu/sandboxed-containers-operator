@@ -12,11 +12,13 @@ const (
 	FgConfigMapName         = "osc-feature-gates"
 	ConfidentialFeatureGate = "confidential"
 	LayeredImageDeployment  = "layeredImageDeployment"
+	DaemonSetDeployment     = "daemonSetDeployment"
 )
 
 var DefaultFeatureGates = map[string]bool{
 	ConfidentialFeatureGate: false,
 	LayeredImageDeployment:  false,
+	DaemonSetDeployment:     false,
 }
 
 type FeatureGateStatus struct {
@@ -95,6 +97,25 @@ func (r *KataConfigOpenShiftReconciler) processFeatureGates() error {
 				return err
 			}
 		}
+	}
+
+	if IsEnabled(fgStatus, DaemonSetDeployment) {
+		r.Log.Info("Feature gate is enabled", "featuregate", DaemonSetDeployment)
+		// Perform the necessary actions
+		if err := r.handleDaemonSetFeature(Enabled); err != nil {
+			return err
+		}
+	} else {
+		r.Log.Info("Feature gate is disabled", "featuregate", DaemonSetDeployment)
+		// Perform the necessary actions
+		if err := r.handleDaemonSetFeature(Disabled); err != nil {
+			return err
+		}
+	}
+
+	if r.DeploymentMode == DaemonSet {
+		r.Log.Info("Skipping layered image deployment feature because MC is not available")
+		return nil
 	}
 
 	// Check layered Image deployment FG
