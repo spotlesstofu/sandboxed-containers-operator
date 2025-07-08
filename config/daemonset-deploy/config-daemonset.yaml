@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: osc-config-sync
+spec:
+  template:
+    spec:
+      containers:
+      - name: config-sync
+        image: registry.redhat.io/ubi9/ubi-minimal:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -xeuo pipefail
+          
+          # Function to sync a file from configmap to host
+          sync_file() {
+            local src_file="$1"
+            local dest_file="$2"
+            
+            if [ -f "$src_file" ]; then
+              cp "$src_file" "$dest_file"
+              chmod 644 "$dest_file"
+              echo "Synced $(basename "$src_file") to $dest_file"
+            else
+              echo "Warning: $(basename "$src_file") not found in configmap"
+            fi
+          }
+          
+          echo "Starting configuration sync..."
+          
+          # Sync configuration files
+          sync_file "/osc-configs/50-kata-remote" "/host/etc/crio/crio.conf.d/50-kata-remote"
+          sync_file "/osc-configs/configuration-remote.toml" "/host/opt/kata/configuration-remote.toml"
+          
+          echo "Configuration sync completed at $(date)"
+        volumeMounts:
+        - name: host-etc-crio
+          mountPath: /host/etc/crio
+        - name: host-opt-kata
+          mountPath: /host/opt/kata
+        - name: osc-configs
+          mountPath: /osc-configs/50-kata-remote
+          subPath: 50-kata-remote
+          readOnly: true
+        - name: osc-configs
+          mountPath: /osc-configs/configuration-remote.toml
+          subPath: configuration-remote.toml
+          readOnly: true
+      volumes:
+      - name: host-etc-crio
+        hostPath:
+          path: /etc/crio
+          type: Directory
+      - name: host-opt-kata
+        hostPath:
+          path: /opt/kata
+          type: Directory
+      - name: osc-configs
+        configMap:
+          name: osc-configs
+     	# Restart policy - OnFailure means only restart if container fails or node reboots
+      restartPolicy: OnFailure
