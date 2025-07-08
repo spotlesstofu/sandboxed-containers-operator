@@ -1,12 +1,12 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: kata-containers-rpm-installer
+  name: osc-rpm-install
 spec:
   template:
     spec:
       containers:
-      - name: rpm
+      - name: rpm-install
         image: rhel-coreos-extensions@sha256...
         command: ["/bin/bash", "-c"]
         args:
@@ -37,4 +37,3 @@ spec:
           type: Directory
      	# Restart policy - OnFailure means only restart if container fails or node reboots
       restartPolicy: OnFailure
-# TODO
