@@ -2,8 +2,12 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
+	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/oc/pkg/cli/admin/release"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -13,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -89,7 +94,6 @@ func (r *KataConfigOpenShiftReconciler) isMCAvailable() (bool, error) {
 
 	return true, nil
 }
-
 
 // This function attempts to replicate the behavior of the original reconcile function,
 // with modifications only in the MachineConfig-related logic.
@@ -206,7 +210,6 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 		}
 	}*/
 
-
 	// TODO:
 	// - Retrieve the image reference and extension
 	// - Run the DaemonSet and monitor its status until completion
@@ -266,8 +269,58 @@ func (r *KataConfigOpenShiftReconciler) addPeerPodsConfigDaemonSet() error {
 }
 
 func (r *KataConfigOpenShiftReconciler) GetExtensionImage() (string, error) {
-	// TODO: Retrieve cluster version, get release image, extract manifest from release image, get the art image from manifest
-	return "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:ad7d7f59ce4297d875e78cbfbf77c28f90126288981f1e4e050f9631abc63835", nil
+	//TODO: Don't use hard coded component name. Other OSes?
+	imageString, err := r.GetImageForComponent("rhel-coreos-extensions")
+	if err != nil {
+		return "", err
+	}
+	if imageString == "" {
+		return "", fmt.Errorf("empty result for image name")
+	}
+
+	return imageString, nil
+}
+
+func (r *KataConfigOpenShiftReconciler) GetImageForComponent(componentName string) (string, error) {
+	clusterVersion := &configv1.ClusterVersion{}
+	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: "version"}, clusterVersion)
+	if err != nil {
+		return "", fmt.Errorf("failed to get cluster version: %w", err)
+	}
+
+	releaseImage := clusterVersion.Status.Desired.Image
+	if releaseImage == "" {
+		return "", fmt.Errorf("no release image found in cluster version")
+	}
+
+	// Create IOStreams
+	streams := genericiooptions.IOStreams{
+		Out:    os.Stdout,
+		ErrOut: os.Stderr,
+	}
+
+	// Create InfoOptions
+	infoOptions := release.NewInfoOptions(streams)
+
+	// Load release info (set retrieveImages to false for faster loading)
+	releaseInfo, err := infoOptions.LoadReleaseInfo(releaseImage, false)
+	if err != nil {
+		fmt.Printf("Error loading release info: %v\n", err)
+		return "", err
+	}
+
+	// Search for the componentName and return
+	for _, tag := range releaseInfo.References.Spec.Tags {
+		if tag.Name == componentName {
+			// we found the short name in ImageStream
+			if tag.From != nil && tag.From.Kind == "DockerImage" {
+				return tag.From.Name, nil
+			}
+		}
+	}
+
+	// Didn't find it
+	return "", nil
 }
 
 func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(imageString string) *appsv1.DaemonSet {
