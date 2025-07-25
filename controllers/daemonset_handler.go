@@ -203,6 +203,24 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 		}
 	}*/
 
+	// TODO: Does labeling changed needed?
+	_, err := r.updateNodeLabels()
+	if err != nil {
+		if k8serrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, nil
+		} else {
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+
+	if r.kataConfig.Spec.EnablePeerPods {
+		err := r.addPeerPodsConfigDaemonSet()
+		if err != nil {
+			r.Log.Info("Adding peerpods configs failed", "err", err)
+			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+		}
+	}
+
 	// Add finalizer for this CR
 	/*if !contains(r.kataConfig.GetFinalizers(), kataConfigFinalizer) {
 		if err := r.addFinalizer(); err != nil {
@@ -327,7 +345,7 @@ func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(imageString stri
 	var (
 		runPrivileged           = true
 		runAsUser         int64 = 0
-		_                       = r.getNodeSelectorAsMap() // TODO: Use kata-oc or another label?
+		nodeSelector            = r.getNodeSelectorAsMap()
 		kataInstallDsName       = "osc-rpm-install"
 
 		script = `
@@ -349,17 +367,6 @@ sleep infinity
 		"name": kataInstallDsName,
 	}
 
-	// TODO: Label nodes that need to run the DaemonSet and use that
-	var nodeSelector map[string]string
-	if r.kataConfig.Spec.KataConfigPoolSelector != nil {
-		nodeSelector = r.kataConfig.Spec.KataConfigPoolSelector.MatchLabels
-	} else {
-		nodeSelector = map[string]string{
-			"node-role.kubernetes.io/worker": "",
-		}
-	}
-
-	// TODO: Add second container that change nodes' labels based on the installation status
 	return &appsv1.DaemonSet{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
