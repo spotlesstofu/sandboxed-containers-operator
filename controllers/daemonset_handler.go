@@ -349,17 +349,24 @@ func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(imageString stri
 		kataInstallDsName       = "osc-rpm-install"
 
 		script = `
-sleep infinity
 set -xeuo pipefail
 available_version=$(rpm -qp /usr/share/rpm-ostree/extensions/kata-containers-*.rpm)
-installed_version=$(chroot /host rpm -q kata-containers) && \
-  [ "$installed_version" = "$available_version" ] && exit
+if installed_version=$(chroot /host rpm -q kata-containers 2>/dev/null); then
+  if [[ "$installed_version" == "$available_version" ]]; then
+    echo "Package already installed and up-to-date: $installed_version"
+    touch /tmp/finished
+    sleep infinity
+  fi
+fi
+
+# Delete finished file (if already exists) to put pod into not ready state
+rm -f /tmp/finished || true
 packages="capstone daxctl-libs edk2-ovmf ipxe-roms-qemu kata-containers libfdt libpmem libpng librdmacm ndctl-libs pixman qemu-img qemu-kvm-common qemu-kvm-core seabios-bin seavgabios-bin virtiofsd"
 mkdir -p /host/tmp/extensions/
 for package in $packages; do cp /usr/share/rpm-ostree/extensions/${package}-* /host/tmp/extensions/; done
-chroot /host rpm-ostree install /tmp/extensions/${available_version}.rpm
+chroot /host /bin/bash -c "rpm-ostree install /tmp/extensions/*"
 rm -rf /host/tmp/extensions/
-sleep infinity
+chroot /host /bin/bash -c "while true; do rpm-ostree status -v | grep -q 'Staged: yes' && echo 'Reboot required'; sleep 60; done"
 `
 	)
 
@@ -408,7 +415,7 @@ sleep infinity
 								RunAsUser:  &runAsUser,
 							},
 							Command: []string{"/bin/bash", "-c"},
-							Args: []string{script},
+							Args:    []string{script},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "host-root",
@@ -417,6 +424,16 @@ sleep infinity
 								{
 									Name:      "host-tmp",
 									MountPath: "/host/tmp",
+								},
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{
+											"cat",
+											"/tmp/finished",
+										},
+									},
 								},
 							},
 						},
