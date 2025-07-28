@@ -348,8 +348,32 @@ func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(imageString stri
 		nodeSelector            = r.getNodeSelectorAsMap()
 		kataInstallDsName       = "osc-rpm-install"
 
+		// TODO: Extract into a configmap and mount it
 		script = `
 set -xeuo pipefail
+
+# Function to check if a reboot is required by looking for "Staged: yes"
+is_reboot_required() {
+  chroot /host /bin/bash -c '
+    rpm-ostree status -v | grep -q "Staged: yes"
+  '
+}
+
+# Loop until reboot is no longer required
+wait_for_reboot_clear() {
+  while is_reboot_required; do
+    echo "Reboot required"
+    sleep 60
+  done
+}
+
+# Initial wait: avoid doing anything if a previous staged update is pending
+wait_for_reboot_clear
+
+# Compare installed and available versions of kata-containers
+# If installation is complete and the installed version matches the available version we are done
+# Create finished file to signal readiness
+# Sleep infinity to prevent pod restart (DaemonSets always restart exited pods)
 available_version=$(rpm -qp /usr/share/rpm-ostree/extensions/kata-containers-*.rpm)
 if installed_version=$(chroot /host rpm -q kata-containers 2>/dev/null); then
   if [[ "$installed_version" == "$available_version" ]]; then
@@ -361,12 +385,23 @@ fi
 
 # Delete finished file (if already exists) to put pod into not ready state
 rm -f /tmp/finished || true
+
+# Prepare to install packages
 packages="capstone daxctl-libs edk2-ovmf ipxe-roms-qemu kata-containers libfdt libpmem libpng librdmacm ndctl-libs pixman qemu-img qemu-kvm-common qemu-kvm-core seabios-bin seavgabios-bin virtiofsd"
 mkdir -p /host/tmp/extensions/
-for package in $packages; do cp /usr/share/rpm-ostree/extensions/${package}-* /host/tmp/extensions/; done
+
+for package in $packages; do
+  cp /usr/share/rpm-ostree/extensions/${package}-* /host/tmp/extensions/
+done
+
+# Install extensions on the node
 chroot /host /bin/bash -c "rpm-ostree install /tmp/extensions/*"
+
+# Clean up temp dir
 rm -rf /host/tmp/extensions/
-chroot /host /bin/bash -c "while true; do rpm-ostree status -v | grep -q 'Staged: yes' && echo 'Reboot required'; sleep 60; done"
+
+# Wait again: rpm-ostree install stages changes, requiring a reboot
+wait_for_reboot_clear
 `
 	)
 
@@ -404,6 +439,7 @@ chroot /host /bin/bash -c "while true; do rpm-ostree status -v | grep -q 'Staged
 					ServiceAccountName: "default", // TODO: Which service account should be used?
 					NodeSelector:       nodeSelector,
 					HostPID:            true,
+					// TODO: Add cli container to label the node and set the installation status
 					Containers: []corev1.Container{
 						{
 							Name:            "rpm-install",
