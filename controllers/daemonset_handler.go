@@ -245,32 +245,40 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 
 	r.Log.Info("got image name", "imageName", imageString)
 
-	// TODO: Check if Ds exists
 	kataInstallDs := r.DaemonSetForKataInstall(imageString)
 	if err := controllerutil.SetControllerReference(r.kataConfig, kataInstallDs, r.Scheme); err != nil {
 		r.Log.Error(err, "Failed setting ControllerReference for cloud-api-adaptor DS")
 		return ctrl.Result{}, err
 	}
+
+	foundKataDs := &appsv1.DaemonSet{}
+	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: kataInstallDs.Name, Namespace: kataInstallDs.Namespace}, foundKataDs)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			r.Log.Info("Creating a new kata installation daemonset", "kataInstallDs.Namespace", kataInstallDs.Namespace, "kataInstallDs.Name", kataInstallDs.Name)
+			err = r.Client.Create(context.TODO(), kataInstallDs)
+			if err != nil {
+				r.Log.Error(err, "error when creating kata installation daemonset")
+				return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+			}
+		} else {
+			r.Log.Error(err, "could not get kata installation daemonset, try again")
+			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+		}
+	} else {
+		r.Log.Info("Updating kata installation daemonset", "kataInstallDs.Namespace", kataInstallDs.Namespace, "kataInstallDs.Name", kataInstallDs.Name)
 	err = r.Client.Update(context.TODO(), kataInstallDs)
 	if err != nil && k8serrors.IsNotFound(err) {
 		r.Log.Error(err, "cloud-api-adaptor daemonset doesn't exist. Creating")
 		err = r.Client.Create(context.TODO(), kataInstallDs)
 		if err != nil {
-			r.Log.Error(err, "failed to create cloud-api-adaptor daemonset")
-			return ctrl.Result{}, err
-		}
-	}
-
-	// create confing, Pod VM image CRD and runtimeclass for peerpods
-	// in case of an error wait a little bit and reconcile
-	// TODO: Should we install CAA first and add the config after?
-	if r.kataConfig.Spec.EnablePeerPods {
-		err := r.addPeerPodsConfigDaemonSet()
-		if err != nil {
-			r.Log.Info("Adding peerpods configs failed", "err", err)
+			r.Log.Error(err, "error when updating kata installation daemonset")
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 		}
-
+	}
+	// create Pod VM image CRD and runtimeclass for peerpods
+	// in case of an error wait a little bit and reconcile
+	if r.kataConfig.Spec.EnablePeerPods {
 		err = r.enablePeerPods()
 		if err != nil {
 			r.Log.Info("Enabling peerpods failed", "err", err)
