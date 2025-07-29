@@ -247,7 +247,7 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 
 	kataInstallDs := r.DaemonSetForKataInstall(imageString)
 	if err := controllerutil.SetControllerReference(r.kataConfig, kataInstallDs, r.Scheme); err != nil {
-		r.Log.Error(err, "Failed setting ControllerReference for cloud-api-adaptor DS")
+		r.Log.Error(err, "Failed setting ControllerReference for kata installation DS")
 		return ctrl.Result{}, err
 	}
 
@@ -268,9 +268,6 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 	} else {
 		r.Log.Info("Updating kata installation daemonset", "kataInstallDs.Namespace", kataInstallDs.Namespace, "kataInstallDs.Name", kataInstallDs.Name)
 	err = r.Client.Update(context.TODO(), kataInstallDs)
-	if err != nil && k8serrors.IsNotFound(err) {
-		r.Log.Error(err, "cloud-api-adaptor daemonset doesn't exist. Creating")
-		err = r.Client.Create(context.TODO(), kataInstallDs)
 		if err != nil {
 			r.Log.Error(err, "error when updating kata installation daemonset")
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
