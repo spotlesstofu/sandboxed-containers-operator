@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -39,6 +40,8 @@ const (
 )
 
 const (
+	peerpodsConfigConfigMapPathLocation = "/config/peerpods"
+	peerpodsConfigConfigMapYaml         = "osc-configs-for-ds.yaml"
 	peerPodsConfigInstallDsName         = "osc-config-sync"
 
 	kataInstallDsName       = "osc-rpm-install"
@@ -233,7 +236,7 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 	if r.kataConfig.Spec.EnablePeerPods {
 		err := r.addPeerPodsConfigDaemonSet()
 		if err != nil {
-			r.Log.Info("Adding peerpods configs failed", "err", err)
+			r.Log.Info("Adding peerpods configs ConfigMap failed", "err", err)
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 		}
 	}
@@ -307,7 +310,83 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 }
 
 func (r *KataConfigOpenShiftReconciler) addPeerPodsConfigDaemonSet() error {
-	// TODO: Add kata-remote CRIO config and config toml to hosts
+	configMapYamlFile := filepath.Join(peerpodsConfigConfigMapPathLocation, peerpodsConfigConfigMapYaml)
+	yamlData, err := readYamlFile(configMapYamlFile)
+	if err != nil {
+		return err
+	}
+
+	cm, err := parseConfigMapYAML(yamlData)
+	if err != nil {
+		return err
+	}
+	if err := controllerutil.SetControllerReference(r.kataConfig, cm, r.Scheme); err != nil {
+		r.Log.Error(err, "Failed setting ControllerReference for peer pods Config Map")
+		return err
+	}
+
+	foundCm := &corev1.ConfigMap{}
+	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: cm.Name, Namespace: cm.Namespace}, foundCm)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			r.Log.Info("Creating a new peer-pods ConfigMap", "cm.Namespace", cm.Namespace, "cm.Name", cm.Name)
+			err = r.Client.Create(context.TODO(), cm)
+			if err != nil {
+				r.Log.Error(err, "Failed to create new ConfigMap", "cm.Namespace", cm.Namespace, "cm.Name", cm.Name)
+				return err
+			}
+		} else {
+			r.Log.Error(err, "could not get peer-pods ConfigMap", "cm.Namespace", cm.Namespace, "cm.Name", cm.Name)
+			return err
+		}
+	} else {
+		r.Log.Info("Updating existing peer-pods ConfigMap", "cm.Namespace", cm.Namespace, "cm.Name", cm.Name)
+		err = r.Client.Update(context.TODO(), cm)
+		if err != nil {
+			r.Log.Error(err, "error when updating peer-pods ConfigMap", "cm.Namespace", cm.Namespace, "cm.Name", cm.Name)
+			return err
+		}
+	}
+
+	imageString, err := r.GetCliImage()
+	if err != nil {
+		r.Log.Info("couldn't get image", "err", err)
+		return err
+	}
+
+	r.Log.Info("got image name", "imageName", imageString)
+
+	peerPodsConfigDs := r.DaemonSetForPeerPodsConfig(imageString)
+	if err := controllerutil.SetControllerReference(r.kataConfig, peerPodsConfigDs, r.Scheme); err != nil {
+		r.Log.Error(err, "Failed setting ControllerReference for peer-pods configuration DS")
+		return err
+	}
+
+	foundPeerPodsConfigDs := &appsv1.DaemonSet{}
+	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: peerPodsConfigDs.Name, Namespace: peerPodsConfigDs.Namespace}, foundPeerPodsConfigDs)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			r.Log.Info("Creating a new peer-pods configuration installation daemonset", "peerPodsConfigDs.Namespace", peerPodsConfigDs.Namespace, "peerPodsConfigDs.Name", peerPodsConfigDs.Name)
+			err = r.Client.Create(context.TODO(), peerPodsConfigDs)
+			if err != nil {
+				r.Log.Error(err, "error when creating peer-pods configuration daemonset")
+				return err
+			}
+		} else {
+			r.Log.Error(err, "could not get peer-pods configuration daemonset, try again")
+			return err
+		}
+	} else {
+		r.Log.Info("Updating peer-pods configuration daemonset", "peerPodsConfigDs.Namespace", peerPodsConfigDs.Namespace, "peerPodsConfigDs.Name", peerPodsConfigDs.Name)
+		err = r.Client.Update(context.TODO(), peerPodsConfigDs)
+		if err != nil {
+			r.Log.Error(err, "error when updating peer-pods configuration daemonset")
+			return err
+		}
+	}
+
+	// TODO: Check for errors
+
 	return nil
 }
 
