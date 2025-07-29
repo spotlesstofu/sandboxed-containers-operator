@@ -237,15 +237,18 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 	// - Do we need any other label?
 	// - Set the "InProgress" condition based on the installation status
 	// - Wait for the installation to complete
-	imageString, err := r.GetExtensionImage()
+	extensionImageString, err := r.GetExtensionImage()
 	if err != nil {
-		r.Log.Info("couldn't get image", "err", err)
+		r.Log.Error(err, "couldn't get extension image")
 		return ctrl.Result{}, err
 	}
 
-	r.Log.Info("got image name", "imageName", imageString)
+	cliImageString, err := r.GetCliImage()
+	if err != nil {
+		r.Log.Error(err, "couldn't get cli image")
+	}
 
-	kataInstallDs := r.DaemonSetForKataInstall(imageString)
+	kataInstallDs := r.DaemonSetForKataInstall(extensionImageString, cliImageString)
 	if err := controllerutil.SetControllerReference(r.kataConfig, kataInstallDs, r.Scheme); err != nil {
 		r.Log.Error(err, "Failed setting ControllerReference for kata installation DS")
 		return ctrl.Result{}, err
@@ -304,6 +307,18 @@ func (r *KataConfigOpenShiftReconciler) GetExtensionImage() (string, error) {
 	return imageString, nil
 }
 
+func (r *KataConfigOpenShiftReconciler) GetCliImage() (string, error) {
+	imageString, err := r.GetImageForComponent("cli")
+	if err != nil {
+		return "", err
+	}
+	if imageString == "" {
+		return "", fmt.Errorf("empty result for image name")
+	}
+
+	return imageString, nil
+}
+
 func (r *KataConfigOpenShiftReconciler) GetImageForComponent(componentName string) (string, error) {
 	clusterVersion := &configv1.ClusterVersion{}
 	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: "version"}, clusterVersion)
@@ -346,15 +361,15 @@ func (r *KataConfigOpenShiftReconciler) GetImageForComponent(componentName strin
 	return "", nil
 }
 
-func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(imageString string) *appsv1.DaemonSet {
+func (r *KataConfigOpenShiftReconciler) DaemonSetForKataInstall(extensionImageString string, cliImageString string) *appsv1.DaemonSet {
 	var (
-		runPrivileged           = true
-		runAsUser         int64 = 0
-		nodeSelector            = r.getNodeSelectorAsMap()
-		kataInstallDsName       = "osc-rpm-install"
+		runPrivileged       = true
+		runAsUser     int64 = 0
+		nodeSelector        = r.getNodeSelectorAsMap()
 
+		// TODO: Use Envars for path and code dependant variables in the script (like the labels' name)
 		// TODO: Extract into a configmap and mount it
-		script = `
+		installScript = `
 set -xeuo pipefail
 
 # Function to check if a reboot is required by looking for "Staged: yes"
@@ -368,8 +383,33 @@ is_reboot_required() {
 wait_for_reboot_clear() {
   while is_reboot_required; do
     echo "Reboot required"
+	set_status_waiting_for_reboot
     sleep 60
   done
+}
+
+clear_status() {
+    rm -rf /tmp/shared/* || true
+}
+
+set_status() {
+    local status_name="$1"
+    touch /tmp/shared/$1
+}
+
+set_status_installed() {
+    clear_status
+    set_status "installed"
+}
+
+set_status_installing() {
+    clear_status
+    set_status "installing"
+}
+
+set_status_waiting_for_reboot() {
+    clear_status
+    set_status "waiting_for_reboot"
 }
 
 # Initial wait: avoid doing anything if a previous staged update is pending
@@ -383,13 +423,13 @@ available_version=$(rpm -qp /usr/share/rpm-ostree/extensions/kata-containers-*.r
 if installed_version=$(chroot /host rpm -q kata-containers 2>/dev/null); then
   if [[ "$installed_version" == "$available_version" ]]; then
     echo "Package already installed and up-to-date: $installed_version"
-    touch /tmp/finished
+    set_status_installed
     sleep infinity
   fi
 fi
 
-# Delete finished file (if already exists) to put pod into not ready state
-rm -f /tmp/finished || true
+# Set installation status to installing
+set_status_installing
 
 # Prepare to install packages
 packages="capstone daxctl-libs edk2-ovmf ipxe-roms-qemu kata-containers libfdt libpmem libpng librdmacm ndctl-libs pixman qemu-img qemu-kvm-common qemu-kvm-core seabios-bin seavgabios-bin virtiofsd"
@@ -407,6 +447,26 @@ rm -rf /host/tmp/extensions/
 
 # Wait again: rpm-ostree install stages changes, requiring a reboot
 wait_for_reboot_clear
+`
+
+		statusCheckScript = `
+set -xeuo pipefail
+
+STATUS_DIR=/tmp/shared
+CURRENT_STATE=""
+
+echo "Watching directory $STATUS_DIR for status file changes..."
+
+while true; do
+	for state in installing installed waiting_for_reboot; do
+		if [ -f "$STATUS_DIR/$state" ] && [ "$CURRENT_STATE" != "$state" ]; then
+		CURRENT_STATE="$state"
+		echo "Detected status: $state"
+		kubectl label node "$NODE_NAME" "kataconfiguration.openshift.io/kata-ds-rpm-install=$state" --overwrite
+		fi
+	done
+	sleep 5
+done
 `
 	)
 
@@ -444,11 +504,10 @@ wait_for_reboot_clear
 					ServiceAccountName: "default", // TODO: Which service account should be used?
 					NodeSelector:       nodeSelector,
 					HostPID:            true,
-					// TODO: Add cli container to label the node and set the installation status
 					Containers: []corev1.Container{
 						{
 							Name:            "rpm-install",
-							Image:           imageString,
+							Image:           extensionImageString,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							SecurityContext: &corev1.SecurityContext{
 								// TODO: do we really need to run as root?
@@ -456,7 +515,7 @@ wait_for_reboot_clear
 								RunAsUser:  &runAsUser,
 							},
 							Command: []string{"/bin/bash", "-c"},
-							Args:    []string{script},
+							Args:    []string{installScript},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "host-root",
@@ -466,13 +525,30 @@ wait_for_reboot_clear
 									Name:      "host-tmp",
 									MountPath: "/host/tmp",
 								},
+								{
+									Name:      "shared",
+									MountPath: "/tmp/shared",
+								},
 							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{
-											"cat",
-											"/tmp/finished",
+						},
+						{
+							Name:            "rpm-install-status",
+							Image:           cliImageString,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"/bin/bash", "-c"},
+							Args:            []string{statusCheckScript},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "shared",
+									MountPath: "/tmp/shared",
+								},
+							},
+							Env: []corev1.EnvVar{
+								{
+									Name: "NODE_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "spec.nodeName",
 										},
 									},
 								},
@@ -493,6 +569,14 @@ wait_for_reboot_clear
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/tmp",
+								},
+							},
+						},
+						{
+							Name: "shared",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{
+									Medium: corev1.StorageMediumDefault,
 								},
 							},
 						},
