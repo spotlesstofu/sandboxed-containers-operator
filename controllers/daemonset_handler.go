@@ -223,7 +223,6 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 		}
 	}*/
 
-	// TODO: Does labeling changed needed?
 	_, err := r.updateNodeLabels()
 	if err != nil {
 		if k8serrors.IsConflict(err) {
@@ -248,15 +247,7 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 		}
 	}*/
 
-	// TODO:
-	// - Retrieve the image reference and extension
-	// - Run the DaemonSet and monitor its status until completion
-	// - Add at least two labels:
-	//     1. One to replace the MCP (MachineConfigPool), to identify which nodes should run the DaemonSet
-	//     2. One to track the installation status
-	// - Do we need any other label?
-	// - Set the "InProgress" condition based on the installation status
-	// - Wait for the installation to complete
+	// TODO: Logic that checks failed installation
 	extensionImageString, err := r.GetExtensionImage()
 	if err != nil {
 		r.Log.Error(err, "couldn't get extension image")
@@ -284,26 +275,93 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 				r.Log.Error(err, "error when creating kata installation daemonset")
 				return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 			}
+			r.setInProgressConditionToInstalling()
 		} else {
 			r.Log.Error(err, "could not get kata installation daemonset, try again")
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 		}
 	} else {
 		r.Log.Info("Updating kata installation daemonset", "kataInstallDs.Namespace", kataInstallDs.Namespace, "kataInstallDs.Name", kataInstallDs.Name)
-	err = r.Client.Update(context.TODO(), kataInstallDs)
+		err = r.Client.Update(context.TODO(), kataInstallDs)
 		if err != nil {
 			r.Log.Error(err, "error when updating kata installation daemonset")
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 		}
 	}
-	// create Pod VM image CRD and runtimeclass for peerpods
-	// in case of an error wait a little bit and reconcile
-	if r.kataConfig.Spec.EnablePeerPods {
-		err = r.enablePeerPods()
+
+	if r.isKataInstallDaemonSetInstalling() && r.getInProgressConditionValue() == corev1.ConditionFalse {
+		r.setInProgressConditionToUpdating()
+	}
+
+	err = r.updateStatusDaemonSet()
+	if err != nil {
+		r.Log.Error(err, "Error updating KataConfig.status")
+	}
+
+	// TODO: Basically the same as in processKataConfigInstallRequest
+	// Should extract into a method
+	if !r.isKataInstallDaemonSetInstalling() {
+		r.Log.Info("create runtime class")
+		r.resetInProgressCondition()
+		err := r.createRuntimeClass(kataRuntimeClassName, kataRuntimeClassCpuOverhead, kataRuntimeClassMemOverhead)
 		if err != nil {
-			r.Log.Info("Enabling peerpods failed", "err", err)
+			// Give sometime for the error to go away before reconciling again
 			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
 		}
+		r.Log.Info("create Scc")
+		err = r.createScc()
+		if err != nil {
+			// Give sometime for the error to go away before reconciling again
+			return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+		}
+
+		ds := r.processDaemonsetForMonitor()
+		// Set KataConfig instance as the owner and controller
+		if err = controllerutil.SetControllerReference(r.kataConfig, ds, r.Scheme); err != nil {
+			r.Log.Error(err, "failed to set controller reference on the monitor daemonset")
+			return ctrl.Result{}, err
+		}
+		r.Log.Info("controller reference set for the monitor daemonset")
+
+		foundDs := &appsv1.DaemonSet{}
+		err = r.Client.Get(context.TODO(), types.NamespacedName{Name: ds.Name, Namespace: ds.Namespace}, foundDs)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				r.Log.Info("Creating a new installation monitor daemonset", "ds.Namespace", ds.Namespace, "ds.Name", ds.Name)
+				err = r.Client.Create(context.TODO(), ds)
+				if err != nil {
+					r.Log.Error(err, "error when creating monitor daemonset")
+					return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+				}
+			} else {
+				r.Log.Error(err, "could not get monitor daemonset, try again")
+				return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+			}
+		} else {
+			r.Log.Info("Updating monitor daemonset", "ds.Namespace", ds.Namespace, "ds.Name", ds.Name)
+			err = r.Client.Update(context.TODO(), ds)
+			if err != nil {
+				r.Log.Error(err, "error when updating monitor daemonset")
+				return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+			}
+		}
+
+		// create Pod VM image CRD and runtimeclass for peerpods
+		// in case of an error wait a little bit and reconcile
+		if r.kataConfig.Spec.EnablePeerPods {
+			err = r.enablePeerPods()
+			if err != nil {
+				r.Log.Info("Enabling peerpods failed", "err", err)
+				return ctrl.Result{Requeue: true, RequeueAfter: 15 * time.Second}, err
+			}
+		}
+
+		// Reset the in progress condition
+		r.resetInProgressCondition()
+	} else {
+		// NodeEventHandler should trigger reconciliation on label changes
+		// so no need for that.
+		r.Log.Info("Waiting for kata installation DaemonSet to finish", "daemonSet", kataInstallDs.Name)
 	}
 
 	return ctrl.Result{}, nil
