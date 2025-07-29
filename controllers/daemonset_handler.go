@@ -39,6 +39,8 @@ const (
 )
 
 const (
+	peerPodsConfigInstallDsName         = "osc-config-sync"
+
 	kataInstallDsName       = "osc-rpm-install"
 	kataDsInstallationLabel = "kataconfiguration.openshift.io/kata-ds-rpm-install"
 )
@@ -307,6 +309,155 @@ func (r *KataConfigOpenShiftReconciler) processDaemonSetKataConfigInstallRequest
 func (r *KataConfigOpenShiftReconciler) addPeerPodsConfigDaemonSet() error {
 	// TODO: Add kata-remote CRIO config and config toml to hosts
 	return nil
+}
+
+func (r *KataConfigOpenShiftReconciler) DaemonSetForPeerPodsConfig(imageString string) *appsv1.DaemonSet {
+	var (
+		runPrivileged                       = true
+		runAsUser                     int64 = 0
+		nodeSelector                        = r.getNodeSelectorAsMap()
+		hostPathTypeDirectory               = corev1.HostPathDirectory
+		hostPathTypeDirectoryOrCreate       = corev1.HostPathDirectoryOrCreate
+	)
+
+	// TODO: configuration-remote.toml is set to 420 in MC
+	// Add another paramter that defines the permissions
+
+	script := `
+set -xeuo pipefail
+
+# Function to sync a file from configmap to host
+sync_file() {
+local src_file="$1"
+local dest_file="$2"
+
+if [ -f "$src_file" ]; then
+	cp "$src_file" "$dest_file"
+	chmod 644 "$dest_file"
+	echo "Synced $(basename "$src_file") to $dest_file"
+else
+	echo "Warning: $(basename "$src_file") not found in configmap"
+fi
+}
+
+echo "Starting configuration sync..."
+
+# Sync configuration files
+sync_file "/osc-configs/50-kata-remote" "/host/etc/crio/crio.conf.d/50-kata-remote"
+sync_file "/osc-configs/configuration-remote.toml" "/host/opt/kata/configuration-remote.toml"
+
+echo "Configuration sync completed at $(date)"
+
+echo "Sending signal to reload  crio config"
+pidof crio
+kill -1 $(pidof crio)
+sleep infinity
+	`
+
+	dsLabelSelectors := map[string]string{
+		"name": peerPodsConfigInstallDsName,
+	}
+
+	return &appsv1.DaemonSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "DaemonSet",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      peerPodsConfigInstallDsName,
+			Namespace: OperatorNamespace,
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: dsLabelSelectors,
+			},
+			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
+				Type: "RollingUpdate",
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{
+					MaxUnavailable: &intstr.IntOrString{
+						Type:   intstr.Int,
+						IntVal: 1,
+					},
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: dsLabelSelectors,
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "default", // TODO: Which service account should be used?
+					NodeSelector:       nodeSelector,
+					HostPID:            true,
+					Containers: []corev1.Container{
+						{
+							Name:            "rpm-install",
+							Image:           imageString,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							SecurityContext: &corev1.SecurityContext{
+								// TODO: do we really need to run as root?
+								Privileged: &runPrivileged,
+								RunAsUser:  &runAsUser,
+							},
+							Command: []string{"/bin/bash", "-c"},
+							Args:    []string{script},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "host-etc-crio",
+									MountPath: "/host/etc/crio",
+								},
+								{
+									Name:      "host-opt-kata",
+									MountPath: "/host/opt/kata",
+								},
+								{
+									Name:      "osc-configs",
+									MountPath: "/osc-configs/50-kata-remote",
+									SubPath:   "50-kata-remote",
+									ReadOnly:  true,
+								},
+								{
+									Name:      "osc-configs",
+									MountPath: "/osc-configs/configuration-remote.toml",
+									SubPath:   "configuration-remote.toml",
+									ReadOnly:  true,
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "host-etc-crio",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/etc/crio",
+									Type: &hostPathTypeDirectory,
+								},
+							},
+						},
+						{
+							Name: "host-opt-kata",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/opt/kata",
+									Type: &hostPathTypeDirectoryOrCreate,
+								},
+							},
+						},
+						{
+							Name: "osc-configs",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "osc-configs",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 func (r *KataConfigOpenShiftReconciler) GetExtensionImage() (string, error) {
