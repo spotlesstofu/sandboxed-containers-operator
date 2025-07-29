@@ -38,6 +38,21 @@ const (
 	machineConfigKind    = "MachineConfig"
 )
 
+const (
+	kataInstallDsName       = "osc-rpm-install"
+	kataDsInstallationLabel = "kataconfiguration.openshift.io/kata-ds-rpm-install"
+)
+
+type KataDsInstallationState string
+
+// TODO: Do we need to add Failed and WaitToInstall states?
+const (
+	KataDsInstalled        KataDsInstallationState = "installed"
+	KataDsInstalling       KataDsInstallationState = "installing"
+	KataDsWaitingForReboot KataDsInstallationState = "waiting_for_reboot"
+	KataDsUninstalling     KataDsInstallationState = "uninstalling"
+)
+
 // Process the DaemonSet feature gate (FG).
 // This method is invoked by the reconcile loop at its initiation.
 // It examines the current state of the FeatureGate and adjusts the deployment mode (DaemonSet or MachineConfig)
@@ -648,6 +663,64 @@ func (r *KataConfigOpenShiftReconciler) enablePeerPods() error {
 
 	// Reset the in progress condition
 	r.resetInProgressCondition()
+
+	return nil
+}
+
+func (r *KataConfigOpenShiftReconciler) isKataInstallDaemonSetInstalling() bool {
+	nodes, err := r.getNodesWithLabels(r.getNodeSelectorAsMap())
+	if err != nil {
+		r.Log.Error(err, "Getting Node List failed")
+		return false
+	}
+
+	for _, node := range nodes.Items {
+		state, ok := node.Labels[kataDsInstallationLabel]
+		if ok && state == string(KataDsInstalled) || state == string(KataDsWaitingForReboot) {
+			return true
+		}
+	}
+	return false
+}
+
+// TODO: Do we need to retrive all nodes as in the updateStatus function?
+func (r *KataConfigOpenShiftReconciler) updateStatusDaemonSet() error {
+
+	nodes, err := r.getNodesWithLabels(r.getNodeSelectorAsMap())
+	if err != nil {
+		return err
+	}
+
+	r.clearNodeStatusLists()
+
+	r.kataConfig.Status.KataNodes.NodeCount = len(nodes.Items)
+
+	for _, node := range nodes.Items {
+		e := r.putNodeOnStatusListDaemonSet(&node)
+		if e != nil {
+			err = e
+		}
+	}
+
+	r.kataConfig.Status.KataNodes.ReadyNodeCount = len(r.kataConfig.Status.KataNodes.Installed)
+
+	return err
+}
+
+func (r *KataConfigOpenShiftReconciler) putNodeOnStatusListDaemonSet(node *corev1.Node) error {
+	// TODO: Add FailedToInstall nodes
+	kataInstallationState := node.Labels[kataDsInstallationLabel]
+
+	switch kataInstallationState {
+	case string(KataDsInstalling):
+		r.kataConfig.Status.KataNodes.Installing = append(r.kataConfig.Status.KataNodes.Installing, node.GetName())
+	case string(KataDsWaitingForReboot):
+		r.kataConfig.Status.KataNodes.Installing = append(r.kataConfig.Status.KataNodes.Installing, node.GetName())
+	case string(KataDsInstalled):
+		r.kataConfig.Status.KataNodes.Installed = append(r.kataConfig.Status.KataNodes.Installed, node.GetName())
+	default:
+		r.kataConfig.Status.KataNodes.WaitingToInstall = append(r.kataConfig.Status.KataNodes.WaitingToInstall, node.GetName())
+	}
 
 	return nil
 }

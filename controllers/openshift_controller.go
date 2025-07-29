@@ -1788,13 +1788,23 @@ func (eh *NodeEventHandler) Update(ctx context.Context, event event.UpdateEvent,
 
 	foundRelevantChange := false
 
-	// no need to check the second return value of the indexing operation
-	// as "" is not a valid machineconfiguration.openshift.io/state value
-	stateOld := nodeOld.GetAnnotations()["machineconfiguration.openshift.io/state"]
-	stateNew := nodeNew.GetAnnotations()["machineconfiguration.openshift.io/state"]
-	if stateOld != stateNew {
-		foundRelevantChange = true
-		log.Info("machineconfiguration.openshift.io/state changed", "old", stateOld, "new", stateNew)
+	if eh.reconciler.DeploymentMode == DaemonSet {
+		// "" is not a valid kataconfiguration.openshift.io/kata-ds-rpm-install value
+		stateOld := nodeOld.GetAnnotations()[kataDsInstallationLabel]
+		stateNew := nodeNew.GetAnnotations()[kataDsInstallationLabel]
+		if stateOld != stateNew {
+			foundRelevantChange = true
+			log.Info("kataconfiguration.openshift.io/kata-ds-rpm-install changed", "old", stateOld, "new", stateNew)
+		}
+	} else {
+		// no need to check the second return value of the indexing operation
+		// as "" is not a valid machineconfiguration.openshift.io/state value
+		stateOld := nodeOld.GetAnnotations()["machineconfiguration.openshift.io/state"]
+		stateNew := nodeNew.GetAnnotations()["machineconfiguration.openshift.io/state"]
+		if stateOld != stateNew {
+			foundRelevantChange = true
+			log.Info("machineconfiguration.openshift.io/state changed", "old", stateOld, "new", stateNew)
+		}
 	}
 
 	labelsOld := nodeOld.GetLabels()
